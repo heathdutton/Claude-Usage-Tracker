@@ -13,11 +13,18 @@ class StatuslineService {
     /// Swift script that fetches Claude usage data from the API.
     /// Installed to ~/.claude/fetch-claude-usage.swift and executed by the bash statusline script.
     /// The session key and organization ID are injected into this script when statusline is enabled.
-    private func generateSwiftScript(sessionKey: String, organizationId: String) -> String {
+    private func generateSwiftScript(sessionKey: String, organizationId: String, profileName: String?) -> String {
+        let profileNameLine = if let profileName = profileName {
+            "let profileName: String? = \"\(profileName.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+        } else {
+            "let profileName: String? = nil"
+        }
+
         return """
 #!/usr/bin/env swift
 
 import Foundation
+\(profileNameLine)
 func readSessionKey() -> String? {
     // Session key injected from Keychain by Claude Usage app
     let injectedKey = "\(sessionKey)"
@@ -78,11 +85,12 @@ Task {
     do {
         let (utilization, resetsAt) = try await fetchUsageData(sessionKey: sessionKey, orgId: orgId)
 
-        // Output format: UTILIZATION|RESETS_AT
+        // Output format: PROFILE_NAME|UTILIZATION|RESETS_AT
+        let prefix = profileName ?? ""
         if let resets = resetsAt {
-            print("\\(utilization)|\\(resets)")
+            print("\\(prefix)|\\(utilization)|\\(resets)")
         } else {
-            print("\\(utilization)|")
+            print("\\(prefix)|\\(utilization)|")
         }
         exit(0)
     } catch {
@@ -121,12 +129,14 @@ if [ -f "$config_file" ]; then
   show_usage=$SHOW_USAGE
   show_bar=$SHOW_PROGRESS_BAR
   show_reset=$SHOW_RESET_TIME
+  show_profile=${SHOW_PROFILE:-1}
 else
   show_dir=1
   show_branch=1
   show_usage=1
   show_bar=1
   show_reset=1
+  show_profile=1
 fi
 
 input=$(cat)
@@ -169,8 +179,9 @@ if [ "$show_usage" = "1" ]; then
   swift_result=$(swift "$HOME/.claude/fetch-claude-usage.swift" 2>/dev/null)
 
   if [ $? -eq 0 ] && [ -n "$swift_result" ]; then
-    utilization=$(echo "$swift_result" | cut -d'|' -f1)
-    resets_at=$(echo "$swift_result" | cut -d'|' -f2)
+    profile_name=$(echo "$swift_result" | cut -d'|' -f1)
+    utilization=$(echo "$swift_result" | cut -d'|' -f2)
+    resets_at=$(echo "$swift_result" | cut -d'|' -f3)
 
     if [ -n "$utilization" ] && [ "$utilization" != "ERROR" ]; then
       if [ "$utilization" -le 10 ]; then
@@ -251,6 +262,12 @@ if [ "$show_usage" = "1" ]; then
   fi
 fi
 
+profile_text=""
+if [ "$show_profile" = "1" ] && [ -n "$profile_name" ]; then
+  CYAN=$'\\033[0;36m'
+  profile_text="${CYAN}${profile_name}${RESET}"
+fi
+
 output=""
 separator="${GRAY} │ ${RESET}"
 
@@ -259,6 +276,11 @@ separator="${GRAY} │ ${RESET}"
 if [ -n "$branch_text" ]; then
   [ -n "$output" ] && output="${output}${separator}"
   output="${output}${branch_text}"
+fi
+
+if [ -n "$profile_text" ]; then
+  [ -n "$output" ] && output="${output}${separator}"
+  output="${output}${profile_text}"
 fi
 
 if [ -n "$usage_text" ]; then
@@ -298,7 +320,9 @@ printf "%s\\n" "$output"
                 throw StatuslineError.organizationNotConfigured
             }
 
-            swiftScriptContent = generateSwiftScript(sessionKey: sessionKey, organizationId: organizationId)
+            // Include profile name only when multiple profiles exist
+            let profileName = ProfileManager.shared.profiles.count > 1 ? activeProfile.name : nil
+            swiftScriptContent = generateSwiftScript(sessionKey: sessionKey, organizationId: organizationId, profileName: profileName)
             LoggingService.shared.log("Injected session key and org ID from profile '\(activeProfile.name)' into statusline")
         } else {
             // Install placeholder script
@@ -343,7 +367,8 @@ printf "%s\\n" "$output"
         showBranch: Bool,
         showUsage: Bool,
         showProgressBar: Bool,
-        showResetTime: Bool
+        showResetTime: Bool,
+        showProfile: Bool
     ) throws {
         let configPath = Constants.ClaudePaths.claudeDirectory
             .appendingPathComponent("statusline-config.txt")
@@ -354,6 +379,7 @@ SHOW_BRANCH=\(showBranch ? "1" : "0")
 SHOW_USAGE=\(showUsage ? "1" : "0")
 SHOW_PROGRESS_BAR=\(showProgressBar ? "1" : "0")
 SHOW_RESET_TIME=\(showResetTime ? "1" : "0")
+SHOW_PROFILE=\(showProfile ? "1" : "0")
 """
 
         try config.write(to: configPath, atomically: true, encoding: .utf8)
